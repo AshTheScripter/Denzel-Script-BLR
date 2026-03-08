@@ -1,0 +1,645 @@
+-- Denzel's GUI (BLR)
+-- Toggle GUI: Right Alt
+-- Toggle AutoDribble: U
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local StarterGui       = game:GetService("StarterGui")
+local TweenService     = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local L        = Players.LocalPlayer
+local GUI_OPEN = true
+
+getgenv().AutoDribbleSettings = {
+    EnabledAnim   = false,
+    EnabledNoAnim = false,
+    range         = 35,
+    touchRange    = 2,
+}
+local S = getgenv().AutoDribbleSettings
+
+local C, H, M
+AnimCache = {}
+
+local function InitChar()
+    C = L.Character or L.CharacterAdded:Wait()
+    H = C:WaitForChild("HumanoidRootPart")
+    M = C:WaitForChild("Humanoid")
+    AnimCache = {}
+end
+InitChar()
+L.CharacterAdded:Connect(InitChar)
+
+local B = ReplicatedStorage.Packages.Knit.Services.BallService.RE.Dribble
+local A = require(ReplicatedStorage.Assets.Animations)
+
+local function GetAnim(s)
+    if AnimCache[s] then return AnimCache[s] end
+    if A.Dribbles[s] then
+        local a = Instance.new("Animation")
+        a.AnimationId = A.Dribbles[s]
+        local track = M:LoadAnimation(a)
+        AnimCache[s] = track
+        return track
+    end
+end
+
+local function IsOpponent(p)
+    return L.Team and p.Team and L.Team ~= p.Team
+end
+
+-- Script originally made by denzel.natsuki on discord
+
+local slideWasActive = {}
+local touchCooldown  = {}
+local TOUCH_COOLDOWN = 0.6
+
+local function DribbleAnim()
+    if not (C.Values and C.Values.HasBall.Value) then return end
+    B:FireServer()
+    local style = L.PlayerStats.Style.Value
+    local track = GetAnim(style)
+    if track and not track.IsPlaying then
+        track:Play()
+        track:AdjustSpeed(1)
+    end
+    local ball = workspace:FindFirstChild("Football")
+    if ball then
+        ball.AssemblyLinearVelocity = Vector3.zero
+        ball.CFrame = H.CFrame * CFrame.new(0, -2.5, 0)
+    end
+end
+
+local function DribbleNoAnim()
+    if not (C.Values and C.Values.HasBall.Value) then return end
+    B:FireServer()
+    local ball = workspace:FindFirstChild("Football")
+    if ball then
+        ball.AssemblyLinearVelocity = Vector3.zero
+        ball.CFrame = H.CFrame * CFrame.new(0, -2.5, 0)
+    end
+end
+
+local function FireDribble()
+    if S.EnabledAnim   then DribbleAnim()   end
+    if S.EnabledNoAnim then DribbleNoAnim() end
+end
+
+-- Returns current round-trip ping in seconds, capped to avoid bad values
+local function GetPing()
+    local ok, ping = pcall(function()
+        return Players.LocalPlayer:GetNetworkPing()
+    end)
+    if ok and ping then
+        return math.clamp(ping, 0.01, 0.4)
+    end
+    return 0.08 -- fallback 80ms if unavailable
+end
+
+local rangeSq      = S.range * S.range
+local touchRangeSq = S.touchRange * S.touchRange
+
+RunService.Heartbeat:Connect(function()
+    if not (C and H) then return end
+    if not (S.EnabledAnim or S.EnabledNoAnim) then return end
+    if not (C.Values and C.Values.HasBall.Value) then return end
+
+    local myPos = H.Position
+    local now   = tick()
+    local ping  = GetPing()
+
+    -- Buffer: ping + one heartbeat (~16ms) + 30ms input latency
+    local predTime = ping + 0.046
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        if IsOpponent(p) and p.Character then
+            local c = p.Character
+            local v = c.Values and c.Values.Sliding
+            local isSliding = v and v.Value == true
+            local r = c:FindFirstChild("HumanoidRootPart")
+            if r then
+                local rPos = r.Position
+                local rVel = r.AssemblyLinearVelocity
+
+                -- Predict where the opponent WILL BE after ping+buffer seconds
+                local predPos = rPos + rVel * predTime
+
+                local diff        = rPos - myPos
+                local distSq      = diff.X^2 + diff.Y^2 + diff.Z^2
+
+                local predDiff    = predPos - myPos
+                local predDistSq  = predDiff.X^2 + predDiff.Y^2 + predDiff.Z^2
+
+                -- Use the SMALLER of current and predicted dist so we trigger
+                -- if they are approaching fast (arriving within ping window)
+                local effectiveDistSq = math.min(distSq, predDistSq)
+
+                local inRange    = effectiveDistSq < rangeSq
+                local isTouching = effectiveDistSq < touchRangeSq
+
+                -- Slide trigger: rising edge, ping-compensated range
+                if isSliding and not slideWasActive[p] and inRange then
+                    slideWasActive[p] = true
+                    FireDribble()
+
+                -- Contact trigger: opponent is or will be literally on top of us
+                elseif isTouching and (not touchCooldown[p] or now - touchCooldown[p] > TOUCH_COOLDOWN) then
+                    touchCooldown[p] = now
+                    FireDribble()
+                end
+
+                if not isSliding then slideWasActive[p] = false end
+            end
+        end
+    end
+end)
+
+-- Script originally made by denzel.natsuki on discord
+
+local function Notify(title, text, dur)
+    StarterGui:SetCore("SendNotification", {
+        Title    = title,
+        Text     = text,
+        Duration = dur or 3
+    })
+end
+
+local animToggleRef   = nil
+local noAnimToggleRef = nil
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.U then
+        if S.EnabledAnim then
+            S.EnabledAnim = false
+            if animToggleRef then animToggleRef.SetState(false) end
+            Notify("Auto Dribble (Anim)", "Auto Dribbling is Disabled")
+        elseif S.EnabledNoAnim then
+            S.EnabledNoAnim = false
+            if noAnimToggleRef then noAnimToggleRef.SetState(false) end
+            Notify("Auto Dribble (No Anim)", "Auto Dribbling is Disabled")
+        end
+    end
+end)
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name           = "DenzelGUI"
+screenGui.ResetOnSpawn   = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent         = L:WaitForChild("PlayerGui")
+
+local main = Instance.new("Frame")
+main.Name             = "Main"
+main.Size             = UDim2.new(0, 520, 0, 340)
+main.Position         = UDim2.new(0.5, -260, 0.5, -170)
+main.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+main.BorderSizePixel  = 0
+main.Active           = true
+main.Draggable        = true
+main.Parent           = screenGui
+
+local uiCorner = Instance.new("UICorner")
+uiCorner.CornerRadius = UDim.new(0, 6)
+uiCorner.Parent       = main
+
+local topBar = Instance.new("Frame")
+topBar.Name             = "TopBar"
+topBar.Size             = UDim2.new(1, 0, 0, 36)
+topBar.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+topBar.BorderSizePixel  = 0
+topBar.Parent           = main
+
+local topCorner = Instance.new("UICorner")
+topCorner.CornerRadius = UDim.new(0, 6)
+topCorner.Parent       = topBar
+
+local topFix = Instance.new("Frame")
+topFix.Size             = UDim2.new(1, 0, 0, 8)
+topFix.Position         = UDim2.new(0, 0, 1, -8)
+topFix.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+topFix.BorderSizePixel  = 0
+topFix.Parent           = topBar
+
+-- Script originally made by denzel.natsuki on discord
+
+local fpsLabel = Instance.new("TextLabel")
+fpsLabel.Size                 = UDim2.new(0, 100, 1, 0)
+fpsLabel.Position             = UDim2.new(1, -105, 0, 0)
+fpsLabel.BackgroundTransparency = 1
+fpsLabel.TextColor3           = Color3.fromRGB(200, 200, 200)
+fpsLabel.TextSize             = 11
+fpsLabel.Font                 = Enum.Font.GothamBold
+fpsLabel.TextXAlignment       = Enum.TextXAlignment.Right
+fpsLabel.Text                 = "FPS: --"
+fpsLabel.Parent               = topBar
+
+local timerLabel = Instance.new("TextLabel")
+timerLabel.Size                 = UDim2.new(0, 110, 1, 0)
+timerLabel.Position             = UDim2.new(0, 5, 0, 0)
+timerLabel.BackgroundTransparency = 1
+timerLabel.TextColor3           = Color3.fromRGB(200, 200, 200)
+timerLabel.TextSize             = 11
+timerLabel.Font                 = Enum.Font.GothamBold
+timerLabel.TextXAlignment       = Enum.TextXAlignment.Left
+timerLabel.Text                 = "Time Open: 00:00"
+timerLabel.Parent               = topBar
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size                 = UDim2.new(1, 0, 1, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.TextColor3           = Color3.fromRGB(255, 255, 255)
+titleLabel.TextSize             = 14
+titleLabel.Font                 = Enum.Font.GothamBold
+titleLabel.Text                 = "Denzel's GUI (BLR)"
+titleLabel.Parent               = topBar
+
+local collapseBtn = Instance.new("TextButton")
+collapseBtn.Size             = UDim2.new(0, 30, 0, 26)
+collapseBtn.Position         = UDim2.new(1, -32, 0, 5)
+collapseBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+collapseBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
+collapseBtn.TextSize         = 14
+collapseBtn.Font             = Enum.Font.GothamBold
+collapseBtn.Text             = "<"
+collapseBtn.BorderSizePixel  = 0
+collapseBtn.Parent           = topBar
+
+local collapseCorner = Instance.new("UICorner")
+collapseCorner.CornerRadius = UDim.new(0, 4)
+collapseCorner.Parent       = collapseBtn
+
+local tabBar = Instance.new("Frame")
+tabBar.Name             = "TabBar"
+tabBar.Size             = UDim2.new(1, 0, 0, 30)
+tabBar.Position         = UDim2.new(0, 0, 0, 36)
+tabBar.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+tabBar.BorderSizePixel  = 0
+tabBar.Parent           = main
+
+local tabLayout = Instance.new("UIListLayout")
+tabLayout.FillDirection       = Enum.FillDirection.Horizontal
+tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+tabLayout.VerticalAlignment   = Enum.VerticalAlignment.Center
+tabLayout.Padding             = UDim.new(0, 2)
+tabLayout.Parent              = tabBar
+
+-- Script originally made by denzel.natsuki on discord
+
+local tabPadding = Instance.new("UIPadding")
+tabPadding.PaddingLeft = UDim.new(0, 6)
+tabPadding.Parent      = tabBar
+
+local contentArea = Instance.new("Frame")
+contentArea.Name                  = "Content"
+contentArea.Size                  = UDim2.new(1, 0, 1, -66)
+contentArea.Position              = UDim2.new(0, 0, 0, 66)
+contentArea.BackgroundTransparency = 1
+contentArea.Parent                = main
+
+local sideBar = Instance.new("Frame")
+sideBar.Name             = "SideBar"
+sideBar.Size             = UDim2.new(0, 30, 1, -36)
+sideBar.Position         = UDim2.new(1, 0, 0, 36)
+sideBar.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+sideBar.BorderSizePixel  = 0
+sideBar.Visible          = false
+sideBar.Parent           = main
+
+local sideCorner = Instance.new("UICorner")
+sideCorner.CornerRadius = UDim.new(0, 6)
+sideCorner.Parent       = sideBar
+
+local tabs      = {}
+local tabPages  = {}
+local activeTab = nil
+
+local function createTab(name)
+    local btn = Instance.new("TextButton")
+    btn.Size             = UDim2.new(0, 0, 1, -4)
+    btn.AutomaticSize    = Enum.AutomaticSize.X
+    btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    btn.TextColor3       = Color3.fromRGB(160, 160, 160)
+    btn.TextSize         = 12
+    btn.Font             = Enum.Font.GothamBold
+    btn.Text             = " " .. name .. " "
+    btn.BorderSizePixel  = 0
+    btn.Parent           = tabBar
+
+    local bc = Instance.new("UICorner")
+    bc.CornerRadius = UDim.new(0, 4)
+    bc.Parent       = btn
+
+    local page = Instance.new("ScrollingFrame")
+    page.Name                   = name
+    page.Size                   = UDim2.new(1, 0, 1, 0)
+    page.BackgroundTransparency = 1
+    page.BorderSizePixel        = 0
+    page.ScrollBarThickness     = 3
+    page.ScrollBarImageColor3   = Color3.fromRGB(80, 80, 80)
+    page.Visible                = false
+    page.CanvasSize             = UDim2.new(0, 0, 0, 0)
+    page.AutomaticCanvasSize    = Enum.AutomaticSize.Y
+    page.Parent                 = contentArea
+
+    local pageLayout = Instance.new("UIListLayout")
+    pageLayout.FillDirection = Enum.FillDirection.Vertical
+    pageLayout.Padding       = UDim.new(0, 6)
+    pageLayout.Parent        = page
+
+    local pagePadding = Instance.new("UIPadding")
+    pagePadding.PaddingTop   = UDim.new(0, 8)
+    pagePadding.PaddingLeft  = UDim.new(0, 10)
+    pagePadding.PaddingRight = UDim.new(0, 10)
+    pagePadding.Parent       = page
+
+    tabs[name]     = btn
+    tabPages[name] = page
+
+-- Script originally made by denzel.natsuki on discord
+
+    btn.MouseButton1Click:Connect(function()
+        for n, b in pairs(tabs) do
+            b.BackgroundColor3  = Color3.fromRGB(30, 30, 30)
+            b.TextColor3        = Color3.fromRGB(160, 160, 160)
+            tabPages[n].Visible = false
+        end
+        btn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+        btn.TextColor3       = Color3.fromRGB(255, 255, 255)
+        page.Visible         = true
+        activeTab            = name
+    end)
+
+    return page
+end
+
+local function selectTab(name)
+    for n, b in pairs(tabs) do
+        b.BackgroundColor3  = Color3.fromRGB(30, 30, 30)
+        b.TextColor3        = Color3.fromRGB(160, 160, 160)
+        tabPages[n].Visible = false
+    end
+    if tabs[name] then
+        tabs[name].BackgroundColor3  = Color3.fromRGB(45, 45, 45)
+        tabs[name].TextColor3        = Color3.fromRGB(255, 255, 255)
+        tabPages[name].Visible       = true
+        activeTab                    = name
+    end
+end
+
+local function makeLabel(parent, text)
+    local f = Instance.new("Frame")
+    f.Size             = UDim2.new(1, 0, 0, 28)
+    f.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    f.BorderSizePixel  = 0
+    f.Parent           = parent
+
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 5)
+    c.Parent       = f
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size                  = UDim2.new(1, -10, 1, 0)
+    lbl.Position              = UDim2.new(0, 10, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3            = Color3.fromRGB(170, 170, 170)
+    lbl.TextSize              = 12
+    lbl.Font                  = Enum.Font.Gotham
+    lbl.TextXAlignment        = Enum.TextXAlignment.Left
+    lbl.Text                  = text
+    lbl.Parent                = f
+end
+
+local function makeToggle(parent, text, desc, default, callback)
+    local state = default or false
+
+    local f = Instance.new("Frame")
+    f.Size             = UDim2.new(1, 0, 0, 40)
+    f.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    f.BorderSizePixel  = 0
+    f.Parent           = parent
+
+    local fc = Instance.new("UICorner")
+    fc.CornerRadius = UDim.new(0, 5)
+    fc.Parent       = f
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size                  = UDim2.new(1, -60, 0, 20)
+    lbl.Position              = UDim2.new(0, 10, 0, 3)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3            = Color3.fromRGB(220, 220, 220)
+    lbl.TextSize              = 13
+    lbl.Font                  = Enum.Font.GothamBold
+    lbl.TextXAlignment        = Enum.TextXAlignment.Left
+    lbl.Text                  = text
+    lbl.Parent                = f
+
+    local descLbl = Instance.new("TextLabel")
+    descLbl.Size                  = UDim2.new(1, -60, 0, 14)
+    descLbl.Position              = UDim2.new(0, 10, 0, 23)
+    descLbl.BackgroundTransparency = 1
+    descLbl.TextColor3            = Color3.fromRGB(110, 110, 110)
+    descLbl.TextSize              = 11
+    descLbl.Font                  = Enum.Font.Gotham
+    descLbl.TextXAlignment        = Enum.TextXAlignment.Left
+    descLbl.Text                  = desc
+    descLbl.Parent                = f
+
+-- Script originally made by denzel.natsuki on discord
+
+    local pill = Instance.new("Frame")
+    pill.Size             = UDim2.new(0, 36, 0, 18)
+    pill.Position         = UDim2.new(1, -46, 0.5, -9)
+    pill.BackgroundColor3 = state and Color3.fromRGB(0, 200, 100) or Color3.fromRGB(60, 60, 60)
+    pill.BorderSizePixel  = 0
+    pill.Parent           = f
+
+    local pillC = Instance.new("UICorner")
+    pillC.CornerRadius = UDim.new(1, 0)
+    pillC.Parent       = pill
+
+    local knob = Instance.new("Frame")
+    knob.Size             = UDim2.new(0, 14, 0, 14)
+    knob.Position         = state and UDim2.new(1, -16, 0.5, -7) or UDim2.new(0, 2, 0.5, -7)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    knob.BorderSizePixel  = 0
+    knob.Parent           = pill
+
+    local knobC = Instance.new("UICorner")
+    knobC.CornerRadius = UDim.new(1, 0)
+    knobC.Parent       = knob
+
+    local btn = Instance.new("TextButton")
+    btn.Size                  = UDim2.new(1, 0, 1, 0)
+    btn.BackgroundTransparency = 1
+    btn.Text                  = ""
+    btn.Parent                = f
+
+    local function update()
+        TweenService:Create(pill, TweenInfo.new(0.15), {
+            BackgroundColor3 = state and Color3.fromRGB(0, 200, 100) or Color3.fromRGB(60, 60, 60)
+        }):Play()
+        TweenService:Create(knob, TweenInfo.new(0.15), {
+            Position = state and UDim2.new(1, -16, 0.5, -7) or UDim2.new(0, 2, 0.5, -7)
+        }):Play()
+    end
+
+    btn.MouseButton1Click:Connect(function()
+        state = not state
+        update()
+        callback(state)
+    end)
+
+    return {
+        SetState = function(newState)
+            state = newState
+            update()
+        end
+    }
+end
+
+local function makeButton(parent, text, desc, callback)
+    local f = Instance.new("Frame")
+    f.Size             = UDim2.new(1, 0, 0, 40)
+    f.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    f.BorderSizePixel  = 0
+    f.Parent           = parent
+
+    local fc = Instance.new("UICorner")
+    fc.CornerRadius = UDim.new(0, 5)
+    fc.Parent       = f
+
+    local btn = Instance.new("TextButton")
+    btn.Size                  = UDim2.new(1, 0, 1, 0)
+    btn.BackgroundTransparency = 1
+    btn.TextColor3            = Color3.fromRGB(220, 220, 220)
+    btn.TextSize              = 13
+    btn.Font                  = Enum.Font.GothamBold
+    btn.Text                  = text
+    btn.BorderSizePixel       = 0
+    btn.Parent                = f
+
+    local descLbl = Instance.new("TextLabel")
+    descLbl.Size                  = UDim2.new(1, -10, 0, 14)
+    descLbl.Position              = UDim2.new(0, 10, 1, -17)
+    descLbl.BackgroundTransparency = 1
+    descLbl.TextColor3            = Color3.fromRGB(110, 110, 110)
+    descLbl.TextSize              = 11
+    descLbl.Font                  = Enum.Font.Gotham
+    descLbl.TextXAlignment        = Enum.TextXAlignment.Left
+    descLbl.Text                  = desc
+    descLbl.Parent                = f
+
+    btn.MouseButton1Click:Connect(callback)
+end
+
+local function makeSeparator(parent)
+    local sep = Instance.new("Frame")
+    sep.Size             = UDim2.new(1, 0, 0, 1)
+    sep.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    sep.BorderSizePixel  = 0
+    sep.Parent           = parent
+end
+
+-- Script originally made by denzel.natsuki on discord
+
+local homePage    = createTab("Home")
+local dribblePage = createTab("Auto Dribble")
+local infoPage    = createTab("Info")
+
+makeLabel(homePage, "Denzel's GUI (BLR) — Made by Denzel")
+makeLabel(homePage, "Toggle GUI: Right Alt   |   Toggle Dribble: U")
+
+makeLabel(dribblePage, "Auto Dribble — Slide + Contact + Ping Compensation")
+makeSeparator(dribblePage)
+
+local animToggle = makeToggle(
+    dribblePage,
+    "Auto Dribble (With Animation)",
+    "Dribbles with the original game animation",
+    false,
+    function(state)
+        S.EnabledAnim = state
+        if state then
+            S.EnabledNoAnim = false
+            noAnimToggle.SetState(false)
+        end
+        Notify("Auto Dribble (Anim)", "Auto Dribbling is " .. (state and "Enabled" or "Disabled"))
+    end
+)
+animToggleRef = animToggle
+
+local noAnimToggle = makeToggle(
+    dribblePage,
+    "Auto Dribble (No Animation)",
+    "Dribbles silently with no visible animation",
+    false,
+    function(state)
+        S.EnabledNoAnim = state
+        if state then
+            S.EnabledAnim = false
+            animToggle.SetState(false)
+        end
+        Notify("Auto Dribble (No Anim)", "Auto Dribbling is " .. (state and "Enabled" or "Disabled"))
+    end
+)
+noAnimToggleRef = noAnimToggle
+
+makeSeparator(dribblePage)
+makeLabel(dribblePage, "Press U to disable the active dribble")
+
+makeLabel(infoPage, "Script: Denzel's GUI (BLR)")
+makeLabel(infoPage, "Toggle GUI: Right Alt")
+makeLabel(infoPage, "Toggle Dribble OFF: U")
+makeLabel(infoPage, "Triggers: Enemy Slide + Contact (ping-compensated)")
+
+selectTab("Home")
+
+local collapsed = false
+
+collapseBtn.MouseButton1Click:Connect(function()
+    collapsed = not collapsed
+    if collapsed then
+        TweenService:Create(main, TweenInfo.new(0.2), {
+            Size = UDim2.new(0, 30, 0, 340)
+        }):Play()
+        tabBar.Visible      = false
+        contentArea.Visible = false
+        titleLabel.Visible  = false
+        timerLabel.Visible  = false
+        fpsLabel.Visible    = false
+        collapseBtn.Text    = ">"
+    else
+        TweenService:Create(main, TweenInfo.new(0.2), {
+            Size = UDim2.new(0, 520, 0, 340)
+        }):Play()
+        tabBar.Visible      = true
+        contentArea.Visible = true
+        titleLabel.Visible  = true
+        timerLabel.Visible  = true
+        fpsLabel.Visible    = true
+        collapseBtn.Text    = "<"
+    end
+end)
+
+-- Script originally made by denzel.natsuki on discord
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.RightAlt then
+        GUI_OPEN = not GUI_OPEN
+        main.Visible = GUI_OPEN
+    end
+end)
+
+local openTime = tick()
+
+RunService.RenderStepped:Connect(function(dt)
+    local elapsed = tick() - openTime
+    local mins    = math.floor(elapsed / 60)
+    local secs    = math.floor(elapsed % 60)
+    timerLabel.Text = string.format("Time Open: %02d:%02d", mins, secs)
+    local fps = dt > 0 and math.floor(1 / dt) or 0
+    fpsLabel.Text = string.format("FPS: %d", fps)
+end)
